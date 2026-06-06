@@ -14,6 +14,24 @@ use light_control::{
     },
 };
 
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let (command_sender, command_receiver) = std::sync::mpsc::channel::<Command>();
+    let (alarm_button_sender, alarm_button_receiver) = std::sync::mpsc::channel::<Command>();
+
+    let button_sender = command_sender.clone();
+    let _button_thread = std::thread::Builder::new()
+        .name("button-listener".to_string())
+        .spawn(move || lightswitch_loop(button_sender, alarm_button_sender));
+
+    let alarm_sender = command_sender.clone();
+    let _alarm_thread = std::thread::Builder::new()
+        .name("fuck-you-alarm".to_string())
+        .spawn(move || alarm_thread(alarm_sender, alarm_button_receiver));
+    light_controller(command_receiver);
+
+    Ok(())
+}
+
 #[derive(Debug)]
 enum Command {
     LightCommand(LightCommand),
@@ -26,24 +44,6 @@ enum Command {
 enum ControlCommand {
     CycleLeft,
     CycleRight,
-}
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let (command_sender, command_receiver) = std::sync::mpsc::channel::<Command>();
-    let (alarm_button_sender, alarm_button_receiver) = std::sync::mpsc::channel::<Command>();
-
-    let button_sender = command_sender.clone();
-    let _button_thread = std::thread::Builder::new()
-        .name("button-listener".to_string())
-        .spawn(move || subscriber_loop(button_sender, alarm_button_sender));
-
-    let alarm_sender = command_sender.clone();
-    let _alarm_thread = std::thread::Builder::new()
-        .name("fuck-you-alarm".to_string())
-        .spawn(move || alarm_thread(alarm_sender, alarm_button_receiver));
-    light_controller(command_receiver);
-
-    Ok(())
 }
 
 fn alarm_thread(command_sender: Sender<Command>, alarm_button_receiver: Receiver<Command>) {
@@ -76,6 +76,7 @@ fn alarm_thread(command_sender: Sender<Command>, alarm_button_receiver: Receiver
         }
     }
 }
+
 fn light_controller(command_receiver: Receiver<Command>) {
     let mut mqttoptions = MqttOptions::new("rust-controller-pub", "127.0.0.1", 1883);
     mqttoptions.set_keep_alive(Duration::from_secs(5));
@@ -133,7 +134,65 @@ fn light_controller(command_receiver: Receiver<Command>) {
     }
 }
 
-fn subscriber_loop(command_sender: Sender<Command>, alarm_button_sender: Sender<Command>) {
+fn lightswitch_loop(command_sender: Sender<Command>, alarm_button_sender: Sender<Command>) {
+    fn handle_button_press(message: Publish) -> Result<Command, Box<dyn std::error::Error>> {
+        let payload_string: &str = str::from_utf8(&message.payload)?;
+        match message.topic.as_str() {
+            IKEA_SWITCH_TOPIC => {
+                if let Ok(button_press) = serde_json::from_str(payload_string) {
+                    Ok(ikea_switch_callback(button_press))
+                } else {
+                    dbg!(&payload_string);
+                    Err(Box::new(std::io::Error::other("oopsie")))
+                }
+            }
+            PHILLIPS_SWITCH_TOPIC => {
+                if let Ok(button_press) = serde_json::from_str(payload_string) {
+                    Ok(phillips_switch_callback(button_press))
+                } else {
+                    dbg!(&payload_string);
+                    Err(Box::new(std::io::Error::other("oopsie")))
+                }
+            }
+            _ => Ok(Command::NoCommand),
+        }
+    }
+
+    fn ikea_switch_callback(button_press: ButtonMessage) -> Command {
+        match button_press.action {
+            ButtonAction::Press(ControllerButton::On) => Command::LightCommand(LightCommand {
+                target_light: Select::All,
+                target_state: LightState::on(),
+            }),
+            ButtonAction::Press(ControllerButton::Off) => Command::LightCommand(LightCommand {
+                target_light: Select::All,
+                target_state: LightState::off(),
+            }),
+            ButtonAction::Press(ControllerButton::Left) => {
+                Command::ControlCommand(ControlCommand::CycleLeft)
+            }
+            ButtonAction::Press(ControllerButton::Right) => {
+                Command::ControlCommand(ControlCommand::CycleRight)
+            }
+            _ => Command::NoCommand,
+        }
+    }
+
+    fn phillips_switch_callback(button_press: ButtonMessage) -> Command {
+        match button_press.action {
+            ButtonAction::Press(ControllerButton::On) => Command::LightCommand(LightCommand {
+                target_light: Select::All,
+                target_state: LightState::on(),
+            }),
+            ButtonAction::Press(ControllerButton::Off) => Command::LightCommand(LightCommand {
+                target_light: Select::All,
+                target_state: LightState::off(),
+            }),
+            ButtonAction::Press(ControllerButton::Up) => Command::AlarmOnCommand,
+            ButtonAction::Press(ControllerButton::Down) => Command::AlarmOffCommand,
+            _ => Command::NoCommand,
+        }
+    }
     let mut mqttoptions = MqttOptions::new("rust-controller-sub", "127.0.0.1", 1883);
     mqttoptions.set_keep_alive(Duration::from_secs(5));
 
@@ -163,64 +222,5 @@ fn subscriber_loop(command_sender: Sender<Command>, alarm_button_sender: Sender<
         } else {
             eprintln!("[Subscriber] Could not iterate connection!");
         }
-    }
-}
-
-fn handle_button_press(message: Publish) -> Result<Command, Box<dyn std::error::Error>> {
-    let payload_string: &str = str::from_utf8(&message.payload)?;
-    match message.topic.as_str() {
-        IKEA_SWITCH_TOPIC => {
-            if let Ok(button_press) = serde_json::from_str(payload_string) {
-                Ok(ikea_switch_callback(button_press))
-            } else {
-                dbg!(&payload_string);
-                Err(Box::new(std::io::Error::other("oopsie")))
-            }
-        }
-        PHILLIPS_SWITCH_TOPIC => {
-            if let Ok(button_press) = serde_json::from_str(payload_string) {
-                Ok(phillips_switch_callback(button_press))
-            } else {
-                dbg!(&payload_string);
-                Err(Box::new(std::io::Error::other("oopsie")))
-            }
-        }
-        _ => Ok(Command::NoCommand),
-    }
-}
-
-fn ikea_switch_callback(button_press: ButtonMessage) -> Command {
-    match button_press.action {
-        ButtonAction::Press(ControllerButton::On) => Command::LightCommand(LightCommand {
-            target_light: Select::All,
-            target_state: LightState::on(),
-        }),
-        ButtonAction::Press(ControllerButton::Off) => Command::LightCommand(LightCommand {
-            target_light: Select::All,
-            target_state: LightState::off(),
-        }),
-        ButtonAction::Press(ControllerButton::Left) => {
-            Command::ControlCommand(ControlCommand::CycleLeft)
-        }
-        ButtonAction::Press(ControllerButton::Right) => {
-            Command::ControlCommand(ControlCommand::CycleRight)
-        }
-        _ => Command::NoCommand,
-    }
-}
-
-fn phillips_switch_callback(button_press: ButtonMessage) -> Command {
-    match button_press.action {
-        ButtonAction::Press(ControllerButton::On) => Command::LightCommand(LightCommand {
-            target_light: Select::All,
-            target_state: LightState::on(),
-        }),
-        ButtonAction::Press(ControllerButton::Off) => Command::LightCommand(LightCommand {
-            target_light: Select::All,
-            target_state: LightState::off(),
-        }),
-        ButtonAction::Press(ControllerButton::Up) => Command::AlarmOnCommand,
-        ButtonAction::Press(ControllerButton::Down) => Command::AlarmOffCommand,
-        _ => Command::NoCommand,
     }
 }
