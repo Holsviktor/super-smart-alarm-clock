@@ -1,10 +1,13 @@
+use chrono::Timelike;
 use core::str;
 use rumqttc::{Client, Event, MqttOptions, Packet, Publish, QoS};
 use socket2::{Domain, Protocol, Type};
 use std::{
-    io::Read, net::SocketAddr, sync::mpsc::{Receiver, Sender}, time::Duration,
+    io::Read,
+    net::SocketAddr,
+    sync::mpsc::{Receiver, Sender},
+    time::Duration,
 };
-use chrono::Timelike;
 
 use light_control::{
     buttons::{ButtonAction, ButtonMessage, ControllerButton},
@@ -14,12 +17,12 @@ use light_control::{
     },
 };
 
-const HEARTBEAT : [u8 ; 9] = [b'I', b' ', b's', b'u', b'f', b'f', b'e', b'r', b'.'];
+const HEARTBEAT: [u8; 9] = [b'I', b' ', b's', b'u', b'f', b'f', b'e', b'r', b'.'];
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         wait_for_parent_to_die();
-        let program_name = std::env::args().nth(0).expect("Failed to get program name");
+        let program_name = std::env::args().next().expect("Failed to get program name");
         let _child = std::process::Command::new(program_name).spawn();
     }
 
@@ -45,11 +48,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 #[derive(Debug)]
 enum Command {
-    LightCommand(LightCommand),
-    ControlCommand(ControlCommand),
-    AlarmOnCommand,
-    AlarmOffCommand,
-    NoCommand,
+    Light(LightCommand),
+    Control(ControlCommand),
+    AlarmOn,
+    AlarmOff,
+    None,
 }
 #[derive(Debug)]
 enum ControlCommand {
@@ -62,24 +65,24 @@ fn alarm_thread(command_sender: Sender<Command>, alarm_button_receiver: Receiver
     let mut alarm_on: bool = false;
     loop {
         match alarm_button_receiver.try_recv() {
-            Ok(Command::AlarmOnCommand) => alarm_on = true,
-            Ok(Command::AlarmOffCommand) => alarm_on = false,
+            Ok(Command::AlarmOn) => alarm_on = true,
+            Ok(Command::AlarmOff) => alarm_on = false,
             _ => (),
         };
 
-        let current_time = chrono::Local::now();        
+        let current_time = chrono::Local::now();
 
-        if current_time.hour() == 07 && current_time.minute() == 30 && current_time.second() <= 5 {
+        if current_time.hour() == 7 && current_time.minute() == 30 && current_time.second() <= 5 {
             alarm_on = true;
         }
 
         if alarm_on {
-            let _ = command_sender.send(Command::LightCommand(LightCommand {
+            let _ = command_sender.send(Command::Light(LightCommand {
                 target_light: Select::All,
                 target_state: LightState::off(),
             }));
             std::thread::sleep(delay);
-            let _ = command_sender.send(Command::LightCommand(LightCommand {
+            let _ = command_sender.send(Command::Light(LightCommand {
                 target_light: Select::All,
                 target_state: LightState::on(),
             }));
@@ -106,8 +109,8 @@ fn light_controller(command_receiver: Receiver<Command>) {
         });
 
     loop {
-        match command_receiver.recv().unwrap_or(Command::NoCommand) {
-            Command::LightCommand(light_command) => {
+        match command_receiver.recv().unwrap_or(Command::None) {
+            Command::Light(light_command) => {
                 let payload = light_command.as_json();
 
                 let topics = match light_command.topics() {
@@ -126,7 +129,7 @@ fn light_controller(command_receiver: Receiver<Command>) {
                         client.try_publish(topic.as_str(), QoS::AtMostOnce, false, payload.clone());
                 }
             }
-            Command::ControlCommand(control_command) => {
+            Command::Control(control_command) => {
                 let topic_count = SET_TOPICS.len();
                 match control_command {
                     ControlCommand::CycleLeft => {
@@ -139,7 +142,7 @@ fn light_controller(command_receiver: Receiver<Command>) {
 
                 current_topic = SET_TOPICS[current_light_idx].to_string();
             }
-            Command::NoCommand => (),
+            Command::None => (),
             _ => (),
         }
     }
@@ -165,43 +168,43 @@ fn lightswitch_loop(command_sender: Sender<Command>, alarm_button_sender: Sender
                     Err(Box::new(std::io::Error::other("oopsie")))
                 }
             }
-            _ => Ok(Command::NoCommand),
+            _ => Ok(Command::None),
         }
     }
 
     fn ikea_switch_callback(button_press: ButtonMessage) -> Command {
         match button_press.action {
-            ButtonAction::Press(ControllerButton::On) => Command::LightCommand(LightCommand {
+            ButtonAction::Press(ControllerButton::On) => Command::Light(LightCommand {
                 target_light: Select::All,
                 target_state: LightState::on(),
             }),
-            ButtonAction::Press(ControllerButton::Off) => Command::LightCommand(LightCommand {
+            ButtonAction::Press(ControllerButton::Off) => Command::Light(LightCommand {
                 target_light: Select::All,
                 target_state: LightState::off(),
             }),
             ButtonAction::Press(ControllerButton::Left) => {
-                Command::ControlCommand(ControlCommand::CycleLeft)
+                Command::Control(ControlCommand::CycleLeft)
             }
             ButtonAction::Press(ControllerButton::Right) => {
-                Command::ControlCommand(ControlCommand::CycleRight)
+                Command::Control(ControlCommand::CycleRight)
             }
-            _ => Command::NoCommand,
+            _ => Command::None,
         }
     }
 
     fn phillips_switch_callback(button_press: ButtonMessage) -> Command {
         match button_press.action {
-            ButtonAction::Press(ControllerButton::On) => Command::LightCommand(LightCommand {
+            ButtonAction::Press(ControllerButton::On) => Command::Light(LightCommand {
                 target_light: Select::All,
                 target_state: LightState::on(),
             }),
-            ButtonAction::Press(ControllerButton::Off) => Command::LightCommand(LightCommand {
+            ButtonAction::Press(ControllerButton::Off) => Command::Light(LightCommand {
                 target_light: Select::All,
                 target_state: LightState::off(),
             }),
-            ButtonAction::Press(ControllerButton::Up) => Command::AlarmOnCommand,
-            ButtonAction::Press(ControllerButton::Down) => Command::AlarmOffCommand,
-            _ => Command::NoCommand,
+            ButtonAction::Press(ControllerButton::Up) => Command::AlarmOn,
+            ButtonAction::Press(ControllerButton::Down) => Command::AlarmOff,
+            _ => Command::None,
         }
     }
     let mut mqttoptions = MqttOptions::new("rust-controller-sub", "127.0.0.1", 1883);
@@ -214,21 +217,16 @@ fn lightswitch_loop(command_sender: Sender<Command>, alarm_button_sender: Sender
     }
 
     loop {
-        if let Some(Ok(event)) = connection.iter().next() {
-            match event {
-                Event::Incoming(message) => {
-                    if let Packet::Publish(publish_message) = message {
-                        let command =
-                            handle_button_press(publish_message).unwrap_or(Command::NoCommand);
-                        let _ = match command {
-                            Command::AlarmOnCommand | Command::AlarmOffCommand => {
-                                alarm_button_sender.send(command)
-                            }
-                            _ => command_sender.send(command),
-                        };
+        if let Some(Ok(Event::Incoming(message))) = connection.iter().next() {
+            if let Packet::Publish(publish_message) = message {
+                let command =
+                    handle_button_press(publish_message).unwrap_or(Command::None);
+                let _ = match command {
+                    Command::AlarmOn | Command::AlarmOff => {
+                        alarm_button_sender.send(command)
                     }
-                }
-                _ => (),
+                    _ => command_sender.send(command),
+                };
             }
         } else {
             eprintln!("[Subscriber] Could not advance connection!");
@@ -238,18 +236,20 @@ fn lightswitch_loop(command_sender: Sender<Command>, alarm_button_sender: Sender
 
 // Process Pair
 fn wait_for_parent_to_die() {
-    let port : u16 = 6767;
-    let address = SocketAddr::new("127.0.0.1".parse().expect("failed to parse host IP"), port).into();
+    let port: u16 = 6767;
+    let address =
+        SocketAddr::new("127.0.0.1".parse().expect("failed to parse host IP"), port).into();
 
-    let mut socket = socket2::Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).expect("Failed to create socket");
+    let mut socket = socket2::Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))
+        .expect("Failed to create socket");
     let _ = socket.set_freebind_v4(true);
     let _ = socket.set_reuse_port(true);
     let _ = socket.set_read_timeout(Some(Duration::from_millis(1500)));
 
     let _ = socket.bind(&address);
-    
+
     loop {
-        let mut buf = vec![0 ; 1024];
+        let mut buf = vec![0; 1024];
         if let Ok(bytes_read) = socket.read(&mut buf) {
             buf.shrink_to(bytes_read);
             if let Ok(_heartbeat) = String::from_utf8(buf) {
@@ -257,23 +257,25 @@ fn wait_for_parent_to_die() {
                     return;
                 }
             } else {
-                return; 
+                return;
             }
         } else {
-            return 
+            return;
         }
     }
 }
 
 fn process_pair() -> ! {
-    let port : u16 = 6767;
-    let address = SocketAddr::new("127.0.0.1".parse().expect("failed to parse host IP"), port).into();
+    let port: u16 = 6767;
+    let address =
+        SocketAddr::new("127.0.0.1".parse().expect("failed to parse host IP"), port).into();
 
-    let socket = socket2::Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).expect("Failed to create socket");
+    let socket = socket2::Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))
+        .expect("Failed to create socket");
     let _ = socket.set_freebind_v4(true);
     let _ = socket.set_reuse_port(true);
     let _ = socket.set_read_timeout(Some(Duration::from_millis(1500)));
-    
+
     loop {
         let _ = socket.send_to(HEARTBEAT.as_slice(), &address);
         std::thread::sleep(Duration::from_millis(500));

@@ -34,17 +34,13 @@ pub enum TargetLight {
     NightLight,
 }
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, Default)]
 pub enum Select<T> {
-    Current,
+    #[default]
     All,
+    Current,
     Specific(T),
     None,
-}
-impl<T> Default for Select<T> {
-    fn default() -> Select<T> {
-        Select::All
-    }
 }
 
 #[derive(Debug, Copy, Clone)]
