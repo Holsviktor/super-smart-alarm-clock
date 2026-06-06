@@ -4,6 +4,7 @@ use std::{
     sync::mpsc::{Receiver, Sender},
     time::Duration,
 };
+use chrono::Timelike;
 
 use light_control::{
     buttons::{ButtonAction, ButtonMessage, ControllerButton},
@@ -17,6 +18,8 @@ use light_control::{
 enum Command {
     LightCommand(LightCommand),
     ControlCommand(ControlCommand),
+    AlarmOnCommand,
+    AlarmOffCommand,
     NoCommand,
 }
 #[derive(Debug)]
@@ -27,16 +30,52 @@ enum ControlCommand {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (command_sender, command_receiver) = std::sync::mpsc::channel::<Command>();
+    let (alarm_button_sender, alarm_button_receiver) = std::sync::mpsc::channel::<Command>();
 
+    let button_sender = command_sender.clone();
     let _button_thread = std::thread::Builder::new()
         .name("button-listener".to_string())
-        .spawn(move || subscriber_loop(command_sender));
+        .spawn(move || subscriber_loop(button_sender, alarm_button_sender));
 
+    let alarm_sender = command_sender.clone();
+    let _alarm_thread = std::thread::Builder::new()
+        .name("fuck-you-alarm".to_string())
+        .spawn(move || alarm_thread(alarm_sender, alarm_button_receiver));
     light_controller(command_receiver);
 
     Ok(())
 }
 
+fn alarm_thread(command_sender: Sender<Command>, alarm_button_receiver: Receiver<Command>) {
+    let delay = Duration::from_millis(400);
+    let mut alarm_on: bool = false;
+    loop {
+        match alarm_button_receiver.try_recv() {
+            Ok(Command::AlarmOnCommand) => alarm_on = true,
+            Ok(Command::AlarmOffCommand) => alarm_on = false,
+            _ => (),
+        };
+
+        let current_time = chrono::Local::now();        
+
+        if current_time.hour() == 07 && current_time.minute() == 30 && current_time.second() <= 5 {
+            alarm_on = true;
+        }
+
+        if alarm_on {
+            let _ = command_sender.send(Command::LightCommand(LightCommand {
+                target_light: Select::All,
+                target_state: LightState::off(),
+            }));
+            std::thread::sleep(delay);
+            let _ = command_sender.send(Command::LightCommand(LightCommand {
+                target_light: Select::All,
+                target_state: LightState::on(),
+            }));
+            std::thread::sleep(delay);
+        }
+    }
+}
 fn light_controller(command_receiver: Receiver<Command>) {
     let mut mqttoptions = MqttOptions::new("rust-controller-pub", "127.0.0.1", 1883);
     mqttoptions.set_keep_alive(Duration::from_secs(5));
@@ -72,8 +111,7 @@ fn light_controller(command_receiver: Receiver<Command>) {
 
                 for topic in topics {
                     let _ =
-                        println!("{topic}");
-                        let _ = client.try_publish(topic.as_str(), QoS::AtMostOnce, false, payload.clone());
+                        client.try_publish(topic.as_str(), QoS::AtMostOnce, false, payload.clone());
                 }
             }
             Command::ControlCommand(control_command) => {
@@ -88,14 +126,14 @@ fn light_controller(command_receiver: Receiver<Command>) {
                 };
 
                 current_topic = SET_TOPICS[current_light_idx].to_string();
-                println!("Current light: {}", current_topic);
             }
             Command::NoCommand => (),
+            _ => (),
         }
     }
 }
 
-fn subscriber_loop(command_sender: Sender<Command>) {
+fn subscriber_loop(command_sender: Sender<Command>, alarm_button_sender: Sender<Command>) {
     let mut mqttoptions = MqttOptions::new("rust-controller-sub", "127.0.0.1", 1883);
     mqttoptions.set_keep_alive(Duration::from_secs(5));
 
@@ -112,7 +150,12 @@ fn subscriber_loop(command_sender: Sender<Command>) {
                     if let Packet::Publish(publish_message) = message {
                         let command =
                             handle_button_press(publish_message).unwrap_or(Command::NoCommand);
-                        let _ = command_sender.send(command);
+                        let _ = match command {
+                            Command::AlarmOnCommand | Command::AlarmOffCommand => {
+                                alarm_button_sender.send(command)
+                            }
+                            _ => command_sender.send(command),
+                        };
                     }
                 }
                 _ => (),
@@ -141,7 +184,7 @@ fn handle_button_press(message: Publish) -> Result<Command, Box<dyn std::error::
                 dbg!(&payload_string);
                 Err(Box::new(std::io::Error::other("oopsie")))
             }
-        },
+        }
         _ => Ok(Command::NoCommand),
     }
 }
@@ -165,6 +208,7 @@ fn ikea_switch_callback(button_press: ButtonMessage) -> Command {
         _ => Command::NoCommand,
     }
 }
+
 fn phillips_switch_callback(button_press: ButtonMessage) -> Command {
     match button_press.action {
         ButtonAction::Press(ControllerButton::On) => Command::LightCommand(LightCommand {
@@ -175,12 +219,8 @@ fn phillips_switch_callback(button_press: ButtonMessage) -> Command {
             target_light: Select::All,
             target_state: LightState::off(),
         }),
-        ButtonAction::Press(ControllerButton::Up) => {
-            Command::ControlCommand(ControlCommand::CycleLeft)
-        }
-        ButtonAction::Press(ControllerButton::Down) => {
-            Command::ControlCommand(ControlCommand::CycleRight)
-        }
+        ButtonAction::Press(ControllerButton::Up) => Command::AlarmOnCommand,
+        ButtonAction::Press(ControllerButton::Down) => Command::AlarmOffCommand,
         _ => Command::NoCommand,
     }
 }
