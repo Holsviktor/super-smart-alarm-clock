@@ -1,8 +1,8 @@
 use core::str;
 use rumqttc::{Client, Event, MqttOptions, Packet, Publish, QoS};
+use socket2::{Domain, Protocol, Type};
 use std::{
-    sync::mpsc::{Receiver, Sender},
-    time::Duration,
+    io::Read, net::SocketAddr, sync::mpsc::{Receiver, Sender}, time::Duration,
 };
 use chrono::Timelike;
 
@@ -14,22 +14,33 @@ use light_control::{
     },
 };
 
+const HEARTBEAT : [u8 ; 9] = [b'I', b' ', b's', b'u', b'f', b'f', b'e', b'r', b'.'];
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    {
+        wait_for_parent_to_die();
+        let program_name = std::env::args().nth(0).expect("Failed to get program name");
+        let _child = std::process::Command::new(program_name).spawn();
+    }
+
     let (command_sender, command_receiver) = std::sync::mpsc::channel::<Command>();
     let (alarm_button_sender, alarm_button_receiver) = std::sync::mpsc::channel::<Command>();
 
     let button_sender = command_sender.clone();
     let _button_thread = std::thread::Builder::new()
-        .name("button-listener".to_string())
+        .name("button-subscriber".to_string())
         .spawn(move || lightswitch_loop(button_sender, alarm_button_sender));
 
     let alarm_sender = command_sender.clone();
     let _alarm_thread = std::thread::Builder::new()
         .name("fuck-you-alarm".to_string())
         .spawn(move || alarm_thread(alarm_sender, alarm_button_receiver));
-    light_controller(command_receiver);
 
-    Ok(())
+    let _light_thread = std::thread::Builder::new()
+        .name("light-publisher".to_string())
+        .spawn(move || light_controller(command_receiver));
+
+    process_pair();
 }
 
 #[derive(Debug)]
@@ -220,7 +231,51 @@ fn lightswitch_loop(command_sender: Sender<Command>, alarm_button_sender: Sender
                 _ => (),
             }
         } else {
-            eprintln!("[Subscriber] Could not iterate connection!");
+            eprintln!("[Subscriber] Could not advance connection!");
         }
+    }
+}
+
+// Process Pair
+fn wait_for_parent_to_die() {
+    let port : u16 = 6767;
+    let address = SocketAddr::new("127.0.0.1".parse().expect("failed to parse host IP"), port).into();
+
+    let mut socket = socket2::Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).expect("Failed to create socket");
+    let _ = socket.set_freebind_v4(true);
+    let _ = socket.set_reuse_port(true);
+    let _ = socket.set_read_timeout(Some(Duration::from_millis(1500)));
+
+    let _ = socket.bind(&address);
+    
+    loop {
+        let mut buf = vec![0 ; 1024];
+        if let Ok(bytes_read) = socket.read(&mut buf) {
+            buf.shrink_to(bytes_read);
+            if let Ok(_heartbeat) = String::from_utf8(buf) {
+                if bytes_read != 9 {
+                    return;
+                }
+            } else {
+                return; 
+            }
+        } else {
+            return 
+        }
+    }
+}
+
+fn process_pair() -> ! {
+    let port : u16 = 6767;
+    let address = SocketAddr::new("127.0.0.1".parse().expect("failed to parse host IP"), port).into();
+
+    let socket = socket2::Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).expect("Failed to create socket");
+    let _ = socket.set_freebind_v4(true);
+    let _ = socket.set_reuse_port(true);
+    let _ = socket.set_read_timeout(Some(Duration::from_millis(1500)));
+    
+    loop {
+        let _ = socket.send_to(HEARTBEAT.as_slice(), &address);
+        std::thread::sleep(Duration::from_millis(500));
     }
 }
