@@ -77,7 +77,7 @@ impl LightState {
     }
 }
 
-/// Color given in hue, saturation and CIE 1931 Color space coordinate (xy).
+/// Color given in CIE 1931 Color space coordinate (xy).
 #[derive(Debug, Copy, Clone)]
 pub struct Color {
     pub x: f32,
@@ -106,15 +106,13 @@ impl LightCommand {
                     .into_boxed_slice(),
             ),
             Select::Specific(light) => Some(
-                vec![
-                    match light {
-                        TargetLight::TopLight => SET_TOP_LIGHT_TOPIC,
-                        TargetLight::MidLight => SET_MID_LIGHT_TOPIC,
-                        TargetLight::MainLight => SET_MAIN_LIGHT_TOPIC,
-                        TargetLight::NightLight => SET_NIGHT_LIGHT_TOPIC,
-                    }
-                    .to_string(),
-                ]
+                vec![match light {
+                    TargetLight::TopLight => SET_TOP_LIGHT_TOPIC,
+                    TargetLight::MidLight => SET_MID_LIGHT_TOPIC,
+                    TargetLight::MainLight => SET_MAIN_LIGHT_TOPIC,
+                    TargetLight::NightLight => SET_NIGHT_LIGHT_TOPIC,
+                }
+                .to_string()]
                 .into_boxed_slice(),
             ),
             _ => None,

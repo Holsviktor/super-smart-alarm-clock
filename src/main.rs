@@ -5,21 +5,30 @@ use socket2::{Domain, Protocol, Type};
 use std::{
     io::Read,
     net::SocketAddr,
+    path::Path,
     sync::mpsc::{Receiver, Sender},
     time::Duration,
 };
+use toml::Table;
 
 use light_control::{
     buttons::{ButtonAction, ButtonMessage, ControllerButton},
     lights::{
-        IKEA_SWITCH_TOPIC, LightCommand, LightState, PHILLIPS_SWITCH_TOPIC, SET_TOPICS, Select,
+        LightCommand, LightState, Select, IKEA_SWITCH_TOPIC, PHILLIPS_SWITCH_TOPIC, SET_TOPICS,
         TOPICS,
     },
 };
 
 const HEARTBEAT: [u8; 9] = [b'I', b' ', b's', b'u', b'f', b'f', b'e', b'r', b'.'];
 
+const ALARM_MIN_DURATION_SECONDS: u32 = 5;
+static mut ALARM_HOUR: u32 = 0;
+static mut ALARM_MINUTE: u32 = 0;
+static mut ALARM_SECOND: u32 = 0;
+
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    read_config();
     {
         wait_for_parent_to_die();
         let program_name = std::env::args().next().expect("Failed to get program name");
@@ -43,7 +52,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .name("light-publisher".to_string())
         .spawn(move || light_controller(command_receiver));
 
-    process_pair();
+    send_keepalives_to_child();
 }
 
 #[derive(Debug)]
@@ -61,8 +70,34 @@ enum ControlCommand {
 }
 
 fn alarm_thread(command_sender: Sender<Command>, alarm_button_receiver: Receiver<Command>) {
+    struct AlarmTime {
+        hour: u32,
+        minute: u32,
+        second: u32,
+    }
+
     let delay = Duration::from_millis(400);
     let mut alarm_on: bool = false;
+
+    let (start_time, allow_stop_time) = unsafe {
+        let second_with_margin = ALARM_SECOND + ALARM_MIN_DURATION_SECONDS;
+        let minute_with_margin = ALARM_MINUTE + second_with_margin / 60;
+        let hour_with_margin = ALARM_HOUR + minute_with_margin / 60;
+
+        let start_time = AlarmTime {
+            hour: ALARM_HOUR,
+            minute: ALARM_MINUTE,
+            second: ALARM_SECOND,
+        };
+        let allow_stop_time = AlarmTime {
+            hour: hour_with_margin,
+            minute: minute_with_margin,
+            second: second_with_margin,
+        };
+
+        (start_time, allow_stop_time)
+    };
+
     loop {
         match alarm_button_receiver.try_recv() {
             Ok(Command::AlarmOn) => alarm_on = true,
@@ -71,8 +106,14 @@ fn alarm_thread(command_sender: Sender<Command>, alarm_button_receiver: Receiver
         };
 
         let current_time = chrono::Local::now();
+        let correct_hour =
+            start_time.hour <= current_time.hour() && current_time.hour() <= allow_stop_time.hour;
+        let correct_minute = start_time.minute <= current_time.minute()
+            && current_time.minute() <= allow_stop_time.minute;
+        let correct_second = start_time.second <= current_time.second()
+            && current_time.second() <= allow_stop_time.second;
 
-        if current_time.hour() == 7 && current_time.minute() == 30 && current_time.second() <= 5 {
+        if correct_hour && correct_minute && correct_second {
             alarm_on = true;
         }
 
@@ -86,12 +127,13 @@ fn alarm_thread(command_sender: Sender<Command>, alarm_button_receiver: Receiver
                 target_light: Select::All,
                 target_state: LightState::on(),
             }));
-            std::thread::sleep(delay);
         }
+        std::thread::sleep(delay);
     }
 }
 
 fn light_controller(command_receiver: Receiver<Command>) {
+    return;
     let mut mqttoptions = MqttOptions::new("rust-controller-pub", "127.0.0.1", 1883);
     mqttoptions.set_keep_alive(Duration::from_secs(5));
 
@@ -102,10 +144,8 @@ fn light_controller(command_receiver: Receiver<Command>) {
 
     let _connection_thread = std::thread::Builder::new()
         .name("publisher-connection-thread".to_string())
-        .spawn(move || {
-            loop {
-                connection.iter().next();
-            }
+        .spawn(move || loop {
+            connection.iter().next();
         });
 
     loop {
@@ -149,6 +189,7 @@ fn light_controller(command_receiver: Receiver<Command>) {
 }
 
 fn lightswitch_loop(command_sender: Sender<Command>, alarm_button_sender: Sender<Command>) {
+    return;
     fn handle_button_press(message: Publish) -> Result<Command, Box<dyn std::error::Error>> {
         let payload_string: &str = str::from_utf8(&message.payload)?;
         match message.topic.as_str() {
@@ -219,12 +260,9 @@ fn lightswitch_loop(command_sender: Sender<Command>, alarm_button_sender: Sender
     loop {
         if let Some(Ok(Event::Incoming(message))) = connection.iter().next() {
             if let Packet::Publish(publish_message) = message {
-                let command =
-                    handle_button_press(publish_message).unwrap_or(Command::None);
+                let command = handle_button_press(publish_message).unwrap_or(Command::None);
                 let _ = match command {
-                    Command::AlarmOn | Command::AlarmOff => {
-                        alarm_button_sender.send(command)
-                    }
+                    Command::AlarmOn | Command::AlarmOff => alarm_button_sender.send(command),
                     _ => command_sender.send(command),
                 };
             }
@@ -265,7 +303,7 @@ fn wait_for_parent_to_die() {
     }
 }
 
-fn process_pair() -> ! {
+fn send_keepalives_to_child() -> ! {
     let port: u16 = 6767;
     let address =
         SocketAddr::new("127.0.0.1".parse().expect("failed to parse host IP"), port).into();
@@ -279,5 +317,42 @@ fn process_pair() -> ! {
     loop {
         let _ = socket.send_to(HEARTBEAT.as_slice(), &address);
         std::thread::sleep(Duration::from_millis(500));
+    }
+}
+
+fn read_config() {
+    let config = {
+        let home = std::env::var("HOME").expect("Failed to fetch HOME directory from env.");
+        let config_file = Path::new(&home).join(Path::new(".config/light-control.toml"));
+        let config_contents =
+            String::from_utf8(std::fs::read(config_file).expect("Failed to open config file."))
+                .expect("Failed to parse config contents to string");
+        config_contents
+            .parse::<Table>()
+            .expect("Failed to parse config file as toml")
+    };
+
+    let alarm_config = config
+        .get("Alarm")
+        .expect("Config should contain [Alarm] section/");
+    unsafe {
+        ALARM_HOUR = alarm_config
+            .get("hour")
+            .expect("Config should contain [Alarm] hour")
+            .clone()
+            .try_into()
+            .unwrap();
+        ALARM_MINUTE = alarm_config
+            .get("minute")
+            .expect("Config should contain [Alarm] minute")
+            .clone()
+            .try_into()
+            .unwrap();
+        ALARM_SECOND = alarm_config
+            .get("second")
+            .expect("Config should contain [Alarm] second")
+            .clone()
+            .try_into()
+            .unwrap();
     }
 }
