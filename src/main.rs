@@ -28,7 +28,6 @@ static mut ALARM_SECOND: u32 = 0;
 
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    read_config();
     {
         wait_for_parent_to_die();
         let program_name = std::env::args().next().expect("Failed to get program name");
@@ -99,6 +98,7 @@ fn alarm_thread(command_sender: Sender<Command>, alarm_button_receiver: Receiver
     };
 
     loop {
+        read_config();
         match alarm_button_receiver.try_recv() {
             Ok(Command::AlarmOn) => alarm_on = true,
             Ok(Command::AlarmOff) => alarm_on = false,
@@ -113,9 +113,7 @@ fn alarm_thread(command_sender: Sender<Command>, alarm_button_receiver: Receiver
         let correct_second = start_time.second <= current_time.second()
             && current_time.second() <= allow_stop_time.second;
 
-        if correct_hour && correct_minute && correct_second {
-            alarm_on = true;
-        }
+        alarm_on = (correct_hour && correct_minute && correct_second) || alarm_on;
 
         if alarm_on {
             let _ = command_sender.send(Command::Light(LightCommand {
@@ -133,7 +131,6 @@ fn alarm_thread(command_sender: Sender<Command>, alarm_button_receiver: Receiver
 }
 
 fn light_controller(command_receiver: Receiver<Command>) {
-    return;
     let mut mqttoptions = MqttOptions::new("rust-controller-pub", "127.0.0.1", 1883);
     mqttoptions.set_keep_alive(Duration::from_secs(5));
 
@@ -189,7 +186,6 @@ fn light_controller(command_receiver: Receiver<Command>) {
 }
 
 fn lightswitch_loop(command_sender: Sender<Command>, alarm_button_sender: Sender<Command>) {
-    return;
     fn handle_button_press(message: Publish) -> Result<Command, Box<dyn std::error::Error>> {
         let payload_string: &str = str::from_utf8(&message.payload)?;
         match message.topic.as_str() {
